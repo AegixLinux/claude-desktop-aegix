@@ -74,6 +74,91 @@ t_deb_refused_when_not_in_index() {
   expect_contains "$out" "not in the Packages index"
 }
 
+# --- Task 2 tests ------------------------------------------------------------
+
+# make_isolated_futureme <dir>: prints the path of a wrapper that runs the real
+# futureme with its XDG dirs pointed inside <dir>, so no test touches the real
+# mailbox (isolation pattern verified in the design doc).
+make_isolated_futureme() {
+  local wrap="$1/futureme-isolated"
+  mkdir -p "$1"
+  cat > "$wrap" <<EOF
+#!/usr/bin/env bash
+export XDG_DATA_HOME="$1/share" XDG_CONFIG_HOME="$1/config" XDG_STATE_HOME="$1/state" HOME="$1"
+exec /home/trashh_panda/.local/bin/futureme "\$@"
+EOF
+  chmod +x "$wrap"
+  printf '%s\n' "$wrap"
+}
+
+# run_cron <fixture-base-url>: run --cron with isolated state + mailbox already
+# set up in $TMP by the caller.
+run_cron() {
+  UPDATER_STATE_DIR="$TMP/state" UPDATER_INDEX_URL_BASE="$1" \
+    FUTUREME_BIN="$TMP/futureme-isolated" bash "$UPDATE" --cron 2>&1
+}
+
+mailbox_count() { "$TMP/futureme-isolated" check --count 2>/dev/null || echo 0; }
+
+t_cron_no_update_silent() {
+  fresh_tmp; make_isolated_futureme "$TMP" > /dev/null
+  local out rc
+  out=$(run_cron "file://$FIX/current"); rc=$?
+  expect_exit 0 "$rc" || return 1
+  expect_eq "$out" "" || return 1
+  [[ ! -e $TMP/state/last-notified ]] || _t_fail "state file written on no-update" || return 1
+  expect_eq "$(mailbox_count)" "0"
+}
+
+t_cron_new_version_notifies() {
+  fresh_tmp; make_isolated_futureme "$TMP" > /dev/null
+  local out rc
+  out=$(run_cron "file://$FIX/newer"); rc=$?
+  expect_exit 0 "$rc" || return 1
+  expect_eq "$(cat "$TMP/state/last-notified")" "9.0.0.1" || return 1
+  expect_eq "$(mailbox_count)" "1"
+}
+
+t_cron_dedup() {
+  fresh_tmp; make_isolated_futureme "$TMP" > /dev/null
+  run_cron "file://$FIX/newer" > /dev/null
+  run_cron "file://$FIX/newer" > /dev/null
+  expect_eq "$(mailbox_count)" "1"
+}
+
+t_cron_downgrade_notifies_once() {
+  fresh_tmp; make_isolated_futureme "$TMP" > /dev/null
+  run_cron "file://$FIX/old" > /dev/null   # old fixture max 1.17282.0 < pkgver
+  expect_eq "$(mailbox_count)" "1" || return 1
+  local out
+  out=$(run_cron "file://$FIX/old")
+  expect_eq "$out" "" || return 1
+  expect_eq "$(mailbox_count)" "1"
+}
+
+t_cron_network_failure_silent() {
+  fresh_tmp; make_isolated_futureme "$TMP" > /dev/null
+  local out rc
+  out=$(run_cron "file:///nonexistent-dir-for-test"); rc=$?
+  expect_exit 0 "$rc" || return 1
+  expect_eq "$out" "" || return 1
+  [[ ! -e $TMP/state/last-notified ]] || _t_fail "state written on network failure"
+}
+
+t_cron_lock() {
+  fresh_tmp; make_isolated_futureme "$TMP" > /dev/null
+  mkdir -p "$TMP/state"
+  ( exec 9>"$TMP/state/lock"; flock 9; sleep 3 ) &
+  local holder=$!
+  sleep 0.3
+  local out rc
+  out=$(run_cron "file://$FIX/newer"); rc=$?
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  expect_exit 0 "$rc" || return 1
+  expect_eq "$out" "" || return 1
+  expect_eq "$(mailbox_count)" "0"
+}
+
 # --- runner ------------------------------------------------------------------
 all_tests=$(declare -F | awk '$3 ~ /^t_/ {print $3}')
 tests=${*:-$all_tests}

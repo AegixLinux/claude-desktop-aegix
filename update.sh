@@ -97,7 +97,45 @@ cmd_check() {
   return 1
 }
 
-cmd_cron() { die "not implemented"; }
+state_dir() {
+  printf '%s\n' "${UPDATER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-desktop-updater}"
+}
+
+# notify_futureme <text>: seal a message that delivers on the tick we fire.
+# Returns nonzero if sealing failed (caller must then NOT record state).
+notify_futureme() {
+  "$FUTUREME_BIN" write --deliver "$(date -u -d '-1 minute' +%Y-%m-%dT%H:%M:%SZ)" \
+    --tag claude-desktop --message "$1" > /dev/null 2>&1 || return 1
+  "$FUTUREME_BIN" tick > /dev/null 2>&1 || true
+  pkill -RTMIN+11 dwmblocks 2> /dev/null || true
+}
+
+# --cron: anacron-driven watch. NEVER noisy, NEVER nonzero on the happy or the
+# unreachable path; one futureme message per version, state written only after
+# the message sealed.
+cmd_cron() {
+  local sdir idx ver cur last msg
+  sdir=$(state_dir)
+  mkdir -p "$sdir" 2> /dev/null || exit 0
+  exec 9> "$sdir/lock" || exit 0
+  flock -n 9 || exit 0
+  idx=$(mktemp) || exit 0
+  if ! fetch_index amd64 > "$idx" 2> /dev/null; then rm -f "$idx"; exit 0; fi
+  ver=$(latest_version "$idx") || { rm -f "$idx"; exit 0; }
+  rm -f "$idx"
+  cur=$(pkgbuild_get pkgver)
+  [[ $ver == "$cur" ]] && exit 0
+  last=$(cat "$sdir/last-notified" 2> /dev/null || true)
+  [[ $ver == "$last" ]] && exit 0
+  if [[ $(vercmp "$ver" "$cur") -gt 0 ]]; then
+    msg="claude-desktop $ver is out (packaged: $cur). Run: ~/code/claude-desktop-aegix/update.sh"
+  else
+    msg="claude-desktop upstream regressed to $ver (packaged: $cur). Look manually; the updater never downgrades."
+  fi
+  notify_futureme "$msg" || exit 0
+  printf '%s\n' "$ver" > "$sdir/last-notified"
+  exit 0
+}
 cmd_full() { die "not implemented"; }
 
 # --- dispatch ----------------------------------------------------------------
