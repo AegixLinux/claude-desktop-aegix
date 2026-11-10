@@ -343,11 +343,12 @@ t_full_arch_skew_stops() {
 }
 
 t_namcap_gate() {
+  # Real namcap format is "PKGBUILD (pkgname) E: ...", confirmed live.
   local rc=0
-  ( namcap_gate <<< "PKGBUILD E: something-bad" ) > /dev/null 2>&1 || rc=$?
-  [[ $rc -ne 0 ]] || _t_fail "E: line did not stop the gate" || return 1
+  ( namcap_gate <<< "PKGBUILD (claude-desktop-aegix-bin) E: Missing url" ) > /dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] || _t_fail "real-format E: line did not stop the gate" || return 1
   rc=0
-  ( namcap_gate <<< "PKGBUILD W: only-a-warning" ) > /dev/null 2>&1 || rc=$?
+  ( namcap_gate <<< "PKGBUILD (claude-desktop-aegix-bin) W: only-a-warning" ) > /dev/null 2>&1 || rc=$?
   expect_exit 0 "$rc"
 }
 
@@ -366,6 +367,121 @@ t_no_publish_prints_plan() {
   expect_contains "$out" "claude-desktop-aegix-bin-aur" || return 1
   expect_eq "$(git -C "$REPO" rev-parse HEAD)" "$repo_head" || return 1
   expect_eq "$(git -C "$HOME/code/claude-desktop-aegix-bin-aur" rev-parse HEAD)" "$aur_head"
+}
+
+# --- Final review fix-pass tests ----------------------------------------------
+
+# make_local_publish_repos: $TMP/rd (branch main) and $TMP/aur (branch master),
+# each with the three files committed and a local bare origin, plus a cgit
+# fixture. Leaves rd's PKGBUILD modified (pkgrel=9) so there is something to
+# publish. Sets RD, AURD, RD_REMOTE, AUR_REMOTE.
+make_local_publish_repos() {
+  RD="$TMP/rd" AURD="$TMP/aur" RD_REMOTE="$TMP/rd-remote.git" AUR_REMOTE="$TMP/aur-remote.git"
+  local d
+  for d in "$RD:main:$RD_REMOTE" "$AURD:master:$AUR_REMOTE"; do
+    local dir=${d%%:*} rest=${d#*:} branch remote
+    branch=${rest%%:*} remote=${rest#*:}
+    git init -q -b "$branch" "$dir"
+    cp "$REPO/PKGBUILD" "$REPO/.SRCINFO" "$REPO/claude-desktop.sh" "$dir/"
+    git -C "$dir" add PKGBUILD .SRCINFO claude-desktop.sh
+    git -C "$dir" -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -qm init
+    git init -q --bare "$remote"
+    git -C "$dir" remote add origin "$remote"
+    git -C "$dir" push -q origin "$branch"
+  done
+  sed -i 's/^pkgrel=.*/pkgrel=9/' "$RD/PKGBUILD"
+  printf 'pkgver = 4.23118.1\npkgrel = 9\n' > "$TMP/cgit-srcinfo"
+}
+
+run_publish() { # run_publish [extra env...] -- <cmd_publish args...>
+  local envs=()
+  while [[ $1 != -- ]]; do envs+=("$1"); shift; done
+  shift
+  env UPDATER_REPO_DIR="$RD" UPDATER_AUR_DIR="$AURD" UPDATER_ASSUME_YES=1 \
+      UPDATER_CGIT_URL="file://$TMP/cgit-srcinfo" "${envs[@]}" \
+      bash -c 'UPDATER_TEST=1 source "'"$UPDATE"'"; cmd_publish "$@"' _ "$@" 2>&1
+}
+
+t_publish_local_success() {
+  fresh_tmp; make_local_publish_repos
+  local out rc=0
+  out=$(run_publish -- 4.23118.1 0) || rc=$?
+  expect_exit 0 "$rc" || { echo "$out" >&2; return 1; }
+  expect_eq "$(git -C "$RD_REMOTE" rev-parse main)" "$(git -C "$RD" rev-parse HEAD)" || return 1
+  expect_eq "$(git -C "$AUR_REMOTE" rev-parse master)" "$(git -C "$AURD" rev-parse HEAD)" || return 1
+  cmp -s "$RD/PKGBUILD" "$AURD/PKGBUILD" || _t_fail "AUR PKGBUILD not byte-identical"
+}
+
+t_publish_push_failure_dies() {
+  fresh_tmp; make_local_publish_repos
+  local aur_before out rc=0
+  aur_before=$(git -C "$AUR_REMOTE" rev-parse master)
+  rm -rf "$RD_REMOTE"
+  out=$(run_publish -- 4.23118.1 0) || rc=$?
+  [[ $rc -ne 0 ]] || _t_fail "publish succeeded with a dead GitHub remote" || return 1
+  expect_eq "$(git -C "$AUR_REMOTE" rev-parse master)" "$aur_before"
+}
+
+t_publish_wrong_branch_dies() {
+  fresh_tmp; make_local_publish_repos
+  git -C "$RD" checkout -q -b deb-updater
+  local out rc=0
+  out=$(run_publish -- 4.23118.1 0) || rc=$?
+  [[ $rc -ne 0 ]] || _t_fail "publish ran off main" || return 1
+  expect_contains "$out" "main"
+}
+
+t_rewrite_failure_leaves_file_untouched() {
+  copy_pkgbuild
+  sed -i '/^sha256sums_aarch64=/d' "$TMP/PKGBUILD"
+  cp "$TMP/PKGBUILD" "$TMP/PKGBUILD.orig"
+  local rc=0
+  ( rewrite_pkgbuild 9.0.0.1 "$SHA_A" "$SHA_B" "$TMP/PKGBUILD" ) > /dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] || _t_fail "expected die" || return 1
+  cmp -s "$TMP/PKGBUILD" "$TMP/PKGBUILD.orig" || _t_fail "failed rewrite corrupted the file"
+}
+
+t_full_dirty_pkgbuild_dies() {
+  fresh_tmp
+  git init -q -b main "$TMP/repo"
+  cp "$REPO/PKGBUILD" "$REPO/.SRCINFO" "$REPO/claude-desktop.sh" "$TMP/repo/"
+  git -C "$TMP/repo" add -A
+  git -C "$TMP/repo" -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -qm init
+  sed -i 's/^pkgrel=.*/pkgrel=5/' "$TMP/repo/PKGBUILD"
+  local out rc=0
+  out=$(run_full "file://$FIX/current" UPDATER_REPO_DIR="$TMP/repo") || rc=$?
+  [[ $rc -ne 0 ]] || _t_fail "expected die on dirty PKGBUILD" || return 1
+  expect_contains "$out" "uncommitted"
+}
+
+t_deb_version_drives_detection() {
+  fresh_tmp
+  local out rc=0
+  out=$(env UPDATER_STATE_DIR="$TMP/state" UPDATER_INDEX_URL_BASE="file://$FIX/newer" \
+        UPDATER_ASSUME_NO=1 bash "$UPDATE" --deb "$REPO/claude-desktop_4.23118.1_amd64.deb" 2>&1) || rc=$?
+  expect_exit 0 "$rc" || { echo "$out" >&2; return 1; }
+  expect_contains "$out" "up to date"
+}
+
+t_full_lock_held_dies() {
+  fresh_tmp
+  mkdir -p "$TMP/state"
+  ( exec 9>"$TMP/state/lock"; flock 9; sleep 3 ) &
+  local holder=$! out rc=0
+  sleep 0.3
+  out=$(run_full "file://$FIX/current") || rc=$?
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  [[ $rc -ne 0 ]] || _t_fail "full run ignored a held lock" || return 1
+  expect_contains "$out" "lock"
+}
+
+t_drift_added_mapped_dep_stops() {
+  fresh_tmp
+  make_synthetic_deb "$TMP/next.deb" 9.0.0.1 bubblewrap
+  local out rc=0
+  out=$(drift_check "$REAL_DEB" "$TMP/next.deb" 2>&1) || rc=$?
+  expect_exit 1 "$rc" || return 1
+  expect_contains "$out" "bubblewrap"
 }
 
 # --- runner ------------------------------------------------------------------

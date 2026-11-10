@@ -20,9 +20,11 @@ FUTUREME_BIN=${FUTUREME_BIN:-/home/trashh_panda/.local/bin/futureme}
 
 die() { echo "update.sh: $*" >&2; exit 1; }
 
-# Interactive yes/no, default no. UPDATER_ASSUME_NO=1 answers no (for tests).
+# Interactive yes/no, default no. UPDATER_ASSUME_NO=1 / UPDATER_ASSUME_YES=1
+# force an answer; both exist for the test harness only, there is no --yes.
 confirm() {
   local reply
+  [[ ${UPDATER_ASSUME_YES:-0} == 1 ]] && return 0
   [[ ${UPDATER_ASSUME_NO:-0} == 1 ]] && return 1
   read -r -p "$1 [y/N] " reply < /dev/tty || return 1
   [[ $reply == y || $reply == Y ]]
@@ -136,8 +138,16 @@ drift_check() {
         stop=1
       fi
     done < <(deb_tokens "$newdir/control" "$field")
-    diff <(deb_tokens "$olddir/control" "$field") <(deb_tokens "$newdir/control" "$field") \
-      | sed -n "s/^</removed $field:/p; s/^>/added $field:/p"
+    # Any ADDED dependency stops the run even when it is already mapped: the
+    # PKGBUILD's depends/optdepends must be reconsidered by a human (spec).
+    while IFS= read -r tok; do
+      echo "STOP: $field gained '$tok' (deps.map: $(grep -m1 "^$tok " "$depsmap" | awk '{print $2}' )); update depends/optdepends, then rerun"
+      stop=1
+    done < <(comm -13 <(deb_tokens "$olddir/control" "$field" | sort -u) \
+                      <(deb_tokens "$newdir/control" "$field" | sort -u))
+    comm -23 <(deb_tokens "$olddir/control" "$field" | sort -u) \
+             <(deb_tokens "$newdir/control" "$field" | sort -u) \
+      | sed "s/^/removed $field (informational): /"
   done
 
   echo "== named paths =="
@@ -190,17 +200,20 @@ fetch_deb() {
 # reset pkgrel=1, write both sums, then re-read and die unless every value
 # reads back exactly (a sed anchor that matched nothing must not ship).
 rewrite_pkgbuild() {
-  local ver=$1 sha64=$2 shaarm=$3 pb=${4:-${UPDATER_REPO_DIR:-$REPO_DIR}/PKGBUILD}
-  sed -i \
+  local ver=$1 sha64=$2 shaarm=$3 pb=${4:-${UPDATER_REPO_DIR:-$REPO_DIR}/PKGBUILD} tmp
+  tmp=$(mktemp) || die "mktemp failed"
+  sed \
     -e "s/^pkgver=.*/pkgver=$ver/" \
     -e "s/^pkgrel=.*/pkgrel=1/" \
     -e "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('$sha64')/" \
     -e "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('$shaarm')/" \
-    "$pb"
-  grep -qx "pkgver=$ver" "$pb" || die "rewrite verification failed: pkgver anchor did not take in $pb"
-  grep -qx "pkgrel=1" "$pb" || die "rewrite verification failed: pkgrel anchor did not take in $pb"
-  grep -qx "sha256sums_x86_64=('$sha64')" "$pb" || die "rewrite verification failed: sha256sums_x86_64 anchor did not take in $pb"
-  grep -qx "sha256sums_aarch64=('$shaarm')" "$pb" || die "rewrite verification failed: sha256sums_aarch64 anchor did not take in $pb"
+    "$pb" > "$tmp" || { rm -f "$tmp"; die "sed failed rewriting $pb"; }
+  local field
+  for field in "pkgver=$ver" "pkgrel=1" "sha256sums_x86_64=('$sha64')" "sha256sums_aarch64=('$shaarm')"; do
+    grep -qxF "$field" "$tmp" \
+      || { rm -f "$tmp"; die "rewrite verification failed: '${field%%=*}' anchor did not take; $pb left untouched"; }
+  done
+  mv "$tmp" "$pb"
 }
 
 # bump_pkgrel [pkgbuild]: increment pkgrel only (packaging-only release).
@@ -215,7 +228,8 @@ bump_pkgrel() {
 # regen_srcinfo [dir]: regenerate .SRCINFO from the PKGBUILD there.
 regen_srcinfo() {
   local dir=${1:-${UPDATER_REPO_DIR:-$REPO_DIR}}
-  ( cd "$dir" && makepkg --printsrcinfo > .SRCINFO ) || die ".SRCINFO regeneration failed in $dir"
+  ( cd "$dir" && makepkg --printsrcinfo > .SRCINFO.tmp && mv .SRCINFO.tmp .SRCINFO ) \
+    || { rm -f "$dir/.SRCINFO.tmp"; die ".SRCINFO regeneration failed in $dir (.SRCINFO left untouched)"; }
 }
 
 # --- modes -------------------------------------------------------------------
@@ -242,9 +256,10 @@ state_dir() {
 # notify_futureme <text>: seal a message that delivers on the tick we fire.
 # Returns nonzero if sealing failed (caller must then NOT record state).
 notify_futureme() {
+  # 9>&- keeps the cron lock fd out of futureme's children.
   "$FUTUREME_BIN" write --deliver "$(date -u -d '-1 minute' +%Y-%m-%dT%H:%M:%SZ)" \
-    --tag claude-desktop --message "$1" > /dev/null 2>&1 || return 1
-  "$FUTUREME_BIN" tick > /dev/null 2>&1 || true
+    --tag claude-desktop --message "$1" > /dev/null 2>&1 9>&- || return 1
+  "$FUTUREME_BIN" tick > /dev/null 2>&1 9>&- || true
   pkill -RTMIN+11 dwmblocks 2> /dev/null || true
 }
 
@@ -279,7 +294,7 @@ namcap_gate() {
   local out
   out=$(cat)
   [[ -n $out ]] && printf '%s\n' "$out"
-  if printf '%s\n' "$out" | grep -q '^PKGBUILD E:'; then
+  if printf '%s\n' "$out" | grep -qE '^PKGBUILD( \([^)]*\))? E:'; then
     die "namcap reported errors on the PKGBUILD; fix before building"
   fi
   return 0
@@ -318,6 +333,8 @@ smoke_test() {
   SMOKE_PKG=$pkg
   sudo pacman -U --noconfirm "$pkg" || die "pacman -U failed"
 
+  local pre_running
+  pre_running=$(pgrep -cf /usr/lib/claude-desktop || true)
   start=$(date +%s)
   out=$(timeout 12 claude-desktop 2>&1); rc=$?
   dur=$(( $(date +%s) - start ))
@@ -328,6 +345,11 @@ smoke_test() {
     smoke_fail "app exited after ${dur}s with no surviving instance (exit $rc)"
   fi
   echo "launch: ok (${dur}s, exit $rc, instance running: $(pgrep -cf /usr/lib/claude-desktop))"
+  if [[ ${pre_running:-0} -gt 0 ]]; then
+    echo "NOTE: the app was already running, so this launch handed off to it;"
+    echo "      the GPU/EGL startup path was NOT exercised. Quit the app and"
+    echo "      launch it once by hand before trusting this fully."
+  fi
 
   [[ $(stat -c '%a %U' /usr/lib/claude-desktop/chrome-sandbox) == "4755 root" ]] \
     || smoke_fail "chrome-sandbox is not setuid root"
@@ -371,11 +393,20 @@ build_and_test() {
   smoke_test "$pkgfile"
 }
 
-# cmd_full <deb_path> <no_publish> <pkgrel_only>
+# cmd_full <deb_path> <deb_ver> <no_publish> <pkgrel_only>
 cmd_full() {
-  local deb_path=$1 no_publish=$2 pkgrel_only=$3
-  local sdir idxa idxr ver cur sha64 shaarm newdeb olddeb report
+  local deb_path=$1 deb_ver=$2 no_publish=$3 pkgrel_only=$4
+  local rd sdir idxa idxr ver cur sha64 shaarm newdeb olddeb report
+  rd=${UPDATER_REPO_DIR:-$REPO_DIR}
   sdir=$(state_dir); mkdir -p "$sdir/debs"
+
+  # A previous run that stopped after the rewrite leaves pkgver bumped, and
+  # every later detection would then lie "up to date". Refuse to start dirty.
+  git -C "$rd" diff --quiet HEAD -- PKGBUILD .SRCINFO 2> /dev/null \
+    || die "PKGBUILD/.SRCINFO have uncommitted changes (a previous run stopped midway?): either finish it with --publish-only, or reset with: git -C $rd checkout PKGBUILD .SRCINFO"
+
+  exec 9> "$sdir/lock" || die "cannot open $sdir/lock"
+  flock -n 9 || die "another updater run holds the lock ($sdir/lock); finish or stop it first"
 
   if [[ $pkgrel_only == 1 ]]; then
     echo "packaging-only release: bumping pkgrel"
@@ -388,7 +419,13 @@ cmd_full() {
 
   idxa=$(mktemp) || die "mktemp failed"
   fetch_index amd64 > "$idxa" || die "cannot fetch the amd64 Packages index"
-  ver=$(latest_version "$idxa") || die "no versions in the index"
+  if [[ -n $deb_path ]]; then
+    # A hand-supplied .deb pins the target version: its own (index-verified)
+    # version drives the run, not the index's newest.
+    ver=$deb_ver
+  else
+    ver=$(latest_version "$idxa") || die "no versions in the index"
+  fi
   cur=$(pkgbuild_get pkgver)
   if [[ $ver == "$cur" ]]; then
     echo "up to date: upstream $ver == PKGBUILD $cur"
@@ -418,6 +455,10 @@ cmd_full() {
 
   if [[ -n $deb_path ]]; then
     newdeb=$deb_path
+    # makepkg must use this exact file instead of downloading from the pool.
+    if [[ ! $deb_path -ef "$rd/claude-desktop_${ver}_amd64.deb" ]]; then
+      cp -f "$deb_path" "$rd/claude-desktop_${ver}_amd64.deb" || die "cannot stage $deb_path into $rd"
+    fi
   else
     newdeb=$(fetch_deb "$idxa" "$ver" "$sdir/debs") || exit 1
   fi
@@ -438,7 +479,7 @@ cmd_full() {
   build_and_test "$no_publish"
   cmd_publish "$ver" "$no_publish"
 
-  cp -f "$newdeb" "$sdir/debs/" 2> /dev/null || true
+  cp -f "$newdeb" "$sdir/debs/claude-desktop_${ver}_amd64.deb" 2> /dev/null || true
   echo "== report =="
   echo "updated: $cur -> $ver (pkgrel 1); aarch64 published UNVERIFIED (not buildable here)"
   echo "drift, smoke checks, and publish output are above"
@@ -465,66 +506,85 @@ cmd_publish() {
   aur=${UPDATER_AUR_DIR:-$HOME/code/claude-desktop-aegix-bin-aur}
   rel=$(pkgbuild_get pkgrel)
   [[ $no_publish == 1 ]] && export UPDATER_DRY_RUN=1
+
   if [[ ${UPDATER_DRY_RUN:-0} != 1 ]]; then
     confirm "PAUSE 2: publish $ver-$rel to GitHub and the AUR?" || die "stopped before publish"
+    # Pre-flight: the wrong branch or a dirty index silently publishes the
+    # wrong thing, and a stale AUR clone fails halfway (GitHub already pushed).
+    [[ $(git -C "$rd" symbolic-ref --short HEAD) == main ]] \
+      || die "publish must run from main (repo is on $(git -C "$rd" symbolic-ref --short HEAD)); merge first"
+    git -C "$rd" diff --cached --quiet \
+      || die "the repo index has staged changes that would be swept into the update commit; commit or unstage them first"
+    git -C "$aur" fetch -q origin || die "cannot fetch the AUR remote"
+    git -C "$aur" merge-base --is-ancestor "$(git -C "$aur" rev-parse origin/master)" HEAD \
+      || die "the AUR clone is behind origin/master; pull it first"
   fi
 
   echo "== publish: GitHub ($rd) =="
-  run git -C "$rd" add PKGBUILD .SRCINFO claude-desktop.sh
-  run git -C "$rd" commit -m "Update to $ver-$rel"
-  run git -C "$rd" -c "credential.helper=!f(){ echo username=AegixLinux; echo password=\$(gh auth token -u AegixLinux); }; f" push origin main
+  run git -C "$rd" add PKGBUILD .SRCINFO claude-desktop.sh || die "git add failed"
+  run git -C "$rd" commit -m "Update to $ver-$rel" || die "git commit failed in $rd"
+  run git -C "$rd" -c "credential.helper=!f(){ echo username=AegixLinux; echo password=\$(gh auth token -u AegixLinux); }; f" push origin HEAD:main \
+    || die "GitHub push failed"
 
   echo "== publish: AUR ($aur) =="
   for f in PKGBUILD .SRCINFO claude-desktop.sh; do
-    run cp "$rd/$f" "$aur/$f"
-    run cmp "$rd/$f" "$aur/$f"
+    run cp "$rd/$f" "$aur/$f" || die "cp $f failed"
+    run cmp "$rd/$f" "$aur/$f" || die "$f differs between repo and AUR clone after copy; refusing"
   done
-  run git -C "$aur" add PKGBUILD .SRCINFO claude-desktop.sh
-  run git -C "$aur" commit -m "Update to $ver-$rel"
-  run git -C "$aur" push origin HEAD:master
+  run git -C "$aur" add PKGBUILD .SRCINFO claude-desktop.sh || die "git add failed in the AUR clone"
+  run git -C "$aur" commit -m "Update to $ver-$rel" || die "git commit failed in the AUR clone"
+  run git -C "$aur" push origin HEAD:master || die "AUR push failed"
 
   echo "== verify =="
   if [[ ${UPDATER_DRY_RUN:-0} == 1 ]]; then
-    echo "DRY RUN: git ls-remote ssh://aur@aur.archlinux.org/claude-desktop-aegix-bin.git master"
-    echo "DRY RUN: curl -s 'https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=claude-desktop-aegix-bin' | grep pkgver"
+    echo "DRY RUN: git -C $rd ls-remote origin refs/heads/main   (must equal local HEAD)"
+    echo "DRY RUN: git -C $aur ls-remote origin refs/heads/master (must equal local HEAD)"
+    echo "DRY RUN: curl -s 'https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=claude-desktop-aegix-bin' | grep -E 'pkg(ver|rel)'"
     return 0
   fi
-  local remote local_head
-  remote=$(git ls-remote ssh://aur@aur.archlinux.org/claude-desktop-aegix-bin.git master | awk '{print $1}')
-  local_head=$(git -C "$aur" rev-parse HEAD)
-  [[ $remote == "$local_head" ]] || die "AUR push verification failed: remote master is $remote, local HEAD is $local_head"
-  curl -s "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=claude-desktop-aegix-bin" | grep -q "pkgver = $ver" \
-    || die "cgit .SRCINFO does not show pkgver = $ver (the page may lag a moment; recheck by hand)"
-  echo "AUR verified: remote master == local HEAD, cgit shows pkgver = $ver"
+  local want got
+  want=$(git -C "$rd" rev-parse HEAD)
+  got=$(git -C "$rd" ls-remote origin refs/heads/main | awk '{print $1}')
+  [[ $got == "$want" ]] || die "GitHub verification failed: origin/main is $got, local HEAD is $want"
+  want=$(git -C "$aur" rev-parse HEAD)
+  got=$(git -C "$aur" ls-remote origin refs/heads/master | awk '{print $1}')
+  [[ $got == "$want" ]] || die "AUR verification failed: origin/master is $got, local HEAD is $want"
+  local cgit
+  cgit=$(curl -s "${UPDATER_CGIT_URL:-https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=claude-desktop-aegix-bin}")
+  grep -q "pkgver = $ver" <<< "$cgit" && grep -q "pkgrel = $rel" <<< "$cgit" \
+    || die "cgit .SRCINFO does not show $ver-$rel (the page may lag a moment; recheck by hand)"
+  echo "verified: GitHub main and AUR master match local HEADs, cgit shows $ver-$rel"
 }
 
 # --- dispatch ----------------------------------------------------------------
 
 main() {
-  local mode=full deb_path="" no_publish=0 pkgrel_only=0
+  local mode=full deb_path="" deb_ver="" no_publish=0 pkgrel_only=0
   while [[ $# -gt 0 ]]; do
     case $1 in
       --cron) mode=cron ;;
       --check) mode=check ;;
+      --publish-only) mode=publish ;;
       --deb) shift; deb_path=${1:-}; [[ -n $deb_path ]] || die "--deb needs a path" ;;
       --no-publish) no_publish=1 ;;
       --pkgrel) pkgrel_only=1 ;;
-      *) die "unknown flag: $1 (modes: --cron --check --deb PATH --no-publish --pkgrel)" ;;
+      *) die "unknown flag: $1 (modes: --cron --check --publish-only --deb PATH --no-publish --pkgrel)" ;;
     esac
     shift
   done
   case $mode in
     check) cmd_check ;;
     cron) cmd_cron ;;
+    publish) cmd_publish "$(pkgbuild_get pkgver)" "$no_publish" ;;
     full)
       if [[ -n $deb_path ]]; then
         local idx
         idx=$(mktemp) || die "mktemp failed"
         fetch_index amd64 > "$idx" || die "cannot fetch the Packages index"
-        validate_local_deb "$deb_path" "$idx" > /dev/null
+        deb_ver=$(validate_local_deb "$deb_path" "$idx")
         rm -f "$idx"
       fi
-      cmd_full "$deb_path" "$no_publish" "$pkgrel_only"
+      cmd_full "$deb_path" "$deb_ver" "$no_publish" "$pkgrel_only"
       ;;
   esac
 }
