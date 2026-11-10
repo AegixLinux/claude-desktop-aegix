@@ -335,6 +335,23 @@ t_namcap_gate() {
   expect_exit 0 "$rc"
 }
 
+# --- Task 6 tests ------------------------------------------------------------
+
+t_no_publish_prints_plan() {
+  fresh_tmp
+  local repo_head aur_head out rc=0
+  repo_head=$(git -C "$REPO" rev-parse HEAD)
+  aur_head=$(git -C "$HOME/code/claude-desktop-aegix-bin-aur" rev-parse HEAD)
+  out=$(UPDATER_DRY_RUN=1 cmd_publish 9.0.0.1 1 2>&1) || rc=$?
+  expect_exit 0 "$rc" || { echo "$out" >&2; return 1; }
+  expect_contains "$out" "HEAD:master" || return 1
+  expect_contains "$out" "credential.helper" || return 1
+  expect_contains "$out" "$REPO" || return 1
+  expect_contains "$out" "claude-desktop-aegix-bin-aur" || return 1
+  expect_eq "$(git -C "$REPO" rev-parse HEAD)" "$repo_head" || return 1
+  expect_eq "$(git -C "$HOME/code/claude-desktop-aegix-bin-aur" rev-parse HEAD)" "$aur_head"
+}
+
 # --- runner ------------------------------------------------------------------
 all_tests=$(declare -F | awk '$3 ~ /^t_/ {print $3}')
 tests=${*:-$all_tests}

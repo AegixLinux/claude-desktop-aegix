@@ -429,7 +429,59 @@ cmd_full() {
   echo "drift, smoke checks, and publish output are above"
 }
 
-cmd_publish() { die "publish not implemented"; }
+# run: execute, or print instead under UPDATER_DRY_RUN=1 (--no-publish).
+run() {
+  if [[ ${UPDATER_DRY_RUN:-0} == 1 ]]; then
+    printf 'DRY RUN: %s\n' "$*"
+  else
+    "$@"
+  fi
+}
+
+# cmd_publish <ver> <no_publish>: pause 2, then GitHub main (one-shot
+# AegixLinux credential helper; the default gh account is timbeach) and the
+# AUR clone (local branch main, AUR wants master, tracking ref gone: the
+# explicit HEAD:master refspec is mandatory). Verification goes through
+# ls-remote and cgit, never the laggy AUR RPC. See the publishing-aur-packages
+# skill for the why behind each of these.
+cmd_publish() {
+  local ver=$1 no_publish=$2 rd aur rel f
+  rd=${UPDATER_REPO_DIR:-$REPO_DIR}
+  aur=${UPDATER_AUR_DIR:-$HOME/code/claude-desktop-aegix-bin-aur}
+  rel=$(pkgbuild_get pkgrel)
+  [[ $no_publish == 1 ]] && export UPDATER_DRY_RUN=1
+  if [[ ${UPDATER_DRY_RUN:-0} != 1 ]]; then
+    confirm "PAUSE 2: publish $ver-$rel to GitHub and the AUR?" || die "stopped before publish"
+  fi
+
+  echo "== publish: GitHub ($rd) =="
+  run git -C "$rd" add PKGBUILD .SRCINFO claude-desktop.sh
+  run git -C "$rd" commit -m "Update to $ver-$rel"
+  run git -C "$rd" -c "credential.helper=!f(){ echo username=AegixLinux; echo password=\$(gh auth token -u AegixLinux); }; f" push origin main
+
+  echo "== publish: AUR ($aur) =="
+  for f in PKGBUILD .SRCINFO claude-desktop.sh; do
+    run cp "$rd/$f" "$aur/$f"
+    run cmp "$rd/$f" "$aur/$f"
+  done
+  run git -C "$aur" add PKGBUILD .SRCINFO claude-desktop.sh
+  run git -C "$aur" commit -m "Update to $ver-$rel"
+  run git -C "$aur" push origin HEAD:master
+
+  echo "== verify =="
+  if [[ ${UPDATER_DRY_RUN:-0} == 1 ]]; then
+    echo "DRY RUN: git ls-remote ssh://aur@aur.archlinux.org/claude-desktop-aegix-bin.git master"
+    echo "DRY RUN: curl -s 'https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=claude-desktop-aegix-bin' | grep pkgver"
+    return 0
+  fi
+  local remote local_head
+  remote=$(git ls-remote ssh://aur@aur.archlinux.org/claude-desktop-aegix-bin.git master | awk '{print $1}')
+  local_head=$(git -C "$aur" rev-parse HEAD)
+  [[ $remote == "$local_head" ]] || die "AUR push verification failed: remote master is $remote, local HEAD is $local_head"
+  curl -s "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=claude-desktop-aegix-bin" | grep -q "pkgver = $ver" \
+    || die "cgit .SRCINFO does not show pkgver = $ver (the page may lag a moment; recheck by hand)"
+  echo "AUR verified: remote master == local HEAD, cgit shows pkgver = $ver"
+}
 
 # --- dispatch ----------------------------------------------------------------
 
