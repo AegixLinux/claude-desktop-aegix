@@ -1,0 +1,46 @@
+# deps.map: Debian package name -> Arch package name, hand curated.
+# One pair per line. "-" means intentionally dropped on Arch (covered by the
+# base system, an alternation we do not take, or deliberately not packaged).
+# update.sh's drift check STOPS on any Depends/Recommends token in a new .deb
+# that has no line here; add the mapping (and the PKGBUILD change it implies),
+# then rerun.
+#
+# Debian Depends (4.23118.1)
+libgtk-3-0 gtk3
+libnotify4 libnotify
+libnss3 nss
+xdg-utils xdg-utils
+libatspi2.0-0 at-spi2-core
+libdrm2 libdrm
+libgbm1 mesa
+libxcb-dri3-0 libxcb
+libsecret-1-0 libsecret
+kde-cli-tools -
+kde-runtime -
+trash-cli -
+libglib2.0-bin -
+gvfs -
+libc6 glibc
+libxtst6 libxtst
+libuuid1 util-linux-libs
+libpipewire-0.3-0 pipewire
+xdg-desktop-portal xdg-desktop-portal
+xdg-desktop-portal-gtk xdg-desktop-portal-gtk
+xdg-desktop-portal-gnome -
+xdg-desktop-portal-kde -
+#
+# Debian Recommends (4.23118.1) -> optdepends or dropped
+libasound2t64 alsa-lib
+libasound2 alsa-lib
+pulseaudio -
+libayatana-appindicator3-1 libappindicator-gtk3
+libappindicator3-1 libappindicator-gtk3
+ca-certificates -
+gnome-keyring gnome-keyring
+plasma-workspace -
+bubblewrap bubblewrap
+socat socat
+openssh-client openssh
+qemu-system-x86 qemu-system-x86
+ovmf edk2-ovmf
+virtiofsd -

@@ -80,6 +80,112 @@ validate_local_deb() {
   printf '%s\n' "$ver"
 }
 
+# Paths inside the .deb that package() copies BY NAME; losing any of them
+# silently drops a file from the package, so drift on these is a hard stop.
+NAMED_PATHS=(
+  usr/lib/claude-desktop/chrome-sandbox
+  usr/share/applications/com.anthropic.Claude.desktop
+  usr/lib/claude-desktop/resources/linux-mime/com.anthropic.Claude.xml
+  usr/lib/claude-desktop/LICENSES.chromium.html
+  usr/share/icons/
+)
+
+# deb_tokens <control-file> <Depends|Recommends>: one Debian package name per
+# line; alternation groups split, version and arch qualifiers stripped.
+deb_tokens() {
+  sed -n "s/^$2: //p" "$1" \
+    | tr ',|' '\n\n' \
+    | sed 's/([^)]*)//g; s/\[[^]]*\]//g; s/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | sed '/^$/d'
+}
+
+# extract_deb <deb> <destdir>: control, maintainer scripts, data file listing.
+# Dies if the data member is not data.tar.xz (prepare() would break too).
+extract_deb() {
+  local deb=$1 dest=$2 cmember dmember
+  mkdir -p "$dest/scripts"
+  cmember=$(bsdtar -tf "$deb" | grep '^control\.tar' | head -1) || die "no control member in $deb"
+  dmember=$(bsdtar -tf "$deb" | grep '^data\.tar' | head -1) || die "no data member in $deb"
+  [[ $dmember == data.tar.xz ]] \
+    || die "data member of $deb is $dmember, not data.tar.xz: the PKGBUILD's prepare() extracts data.tar.xz by name and must be updated first"
+  bsdtar -xOf "$deb" "$cmember" | bsdtar -xO -f - '*control' > "$dest/control"
+  local s
+  for s in postinst prerm postrm preinst; do
+    bsdtar -xOf "$deb" "$cmember" | bsdtar -xO -f - "*$s" > "$dest/scripts/$s" 2> /dev/null || rm -f "$dest/scripts/$s"
+  done
+  bsdtar -xOf "$deb" "$dmember" | bsdtar -t -f - | sed 's|^\./||' > "$dest/files.txt"
+}
+
+# drift_check <old-deb> <new-deb>: print a report; return 0 continue, 1 stop.
+# Stops: unmapped dependency token, a NAMED_PATHS entry missing, non-xz data.
+# Informational: maintainer script diffs, top-level usr/ layout changes.
+drift_check() {
+  local olddir newdir stop=0 depsmap tok p
+  depsmap="${UPDATER_REPO_DIR:-$REPO_DIR}/deps.map"
+  [[ -f $depsmap ]] || die "deps.map not found at $depsmap"
+  olddir=$(mktemp -d) && newdir=$(mktemp -d) || die "mktemp failed"
+  extract_deb "$1" "$olddir" || { rm -rf "$olddir" "$newdir"; return 1; }
+  extract_deb "$2" "$newdir" || { rm -rf "$olddir" "$newdir"; return 1; }
+
+  echo "== dependency drift =="
+  local field
+  for field in Depends Recommends; do
+    while IFS= read -r tok; do
+      if ! grep -q "^$tok " "$depsmap"; then
+        echo "STOP: new $field token '$tok' has no mapping in deps.map"
+        stop=1
+      fi
+    done < <(deb_tokens "$newdir/control" "$field")
+    diff <(deb_tokens "$olddir/control" "$field") <(deb_tokens "$newdir/control" "$field") \
+      | sed -n "s/^</removed $field:/p; s/^>/added $field:/p"
+  done
+
+  echo "== named paths =="
+  for p in "${NAMED_PATHS[@]}"; do
+    if ! grep -q "^$p" "$newdir/files.txt"; then
+      echo "STOP: $p is gone from the new .deb; package() copies it by name"
+      stop=1
+    fi
+  done
+
+  echo "== maintainer scripts (informational) =="
+  local s
+  for s in postinst prerm postrm preinst; do
+    if [[ -f $olddir/scripts/$s || -f $newdir/scripts/$s ]]; then
+      diff -u "$olddir/scripts/$s" "$newdir/scripts/$s" 2>&1 | head -40 || true
+    fi
+  done
+
+  echo "== top-level usr/ layout (informational) =="
+  diff <(cut -d/ -f1-3 "$olddir/files.txt" | sort -u) \
+       <(cut -d/ -f1-3 "$newdir/files.txt" | sort -u) \
+    | sed -n 's/^</vanished:/p; s/^>/new:/p'
+
+  rm -rf "$olddir" "$newdir"
+  return $stop
+}
+
+# fetch_deb <index-file> <version> <destdir>: download the amd64 .deb for
+# <version>, verify its sha256 against the index, cache it under the state
+# dir, and print the cached path. Distinguishes "announced but the pool does
+# not serve it yet" from a hash mismatch.
+fetch_deb() {
+  local idx=$1 ver=$2 dest=$3 fname want got pool cache out
+  fname=$(stanza_field "$idx" "$ver" Filename)
+  want=$(stanza_field "$idx" "$ver" SHA256)
+  [[ -n $fname && -n $want ]] || die "version $ver has no Filename/SHA256 in the index"
+  pool="${UPDATER_POOL_URL_BASE:-$POOL_URL_BASE}"
+  mkdir -p "$dest"
+  out="$dest/$(basename "$fname")"
+  if ! curl -fsS --max-time 600 -o "$out" "$pool/$fname"; then
+    rm -f "$out"
+    die "version $ver is announced in the index but not yet fetchable from the pool ($pool/$fname); try again later"
+  fi
+  got=$(sha256sum "$out" | awk '{print $1}')
+  [[ $got == "$want" ]] || { rm -f "$out"; die "sha256 mismatch for $out: index has $want, download is $got; refusing"; }
+  printf '%s\n' "$out"
+}
+
 # --- modes -------------------------------------------------------------------
 
 cmd_check() {

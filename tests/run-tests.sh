@@ -159,6 +159,94 @@ t_cron_lock() {
   expect_eq "$(mailbox_count)" "0"
 }
 
+# --- Task 3 tests ------------------------------------------------------------
+
+REAL_DEB="$REPO/claude-desktop_4.23118.1_amd64.deb"
+
+# make_synthetic_deb <out.deb> <version> [extra-dep] [data-member] [desktop-path]
+# Builds a tiny structurally valid .deb: real control fields with the version
+# swapped (and an optional extra Depends token), plus a minimal data archive
+# holding every path the PKGBUILD names (the .desktop path is overridable).
+make_synthetic_deb() {
+  local out=$1 ver=$2 extradep=${3:-} datamember=${4:-data.tar.xz} desktop=${5:-usr/share/applications/com.anthropic.Claude.desktop}
+  local w; w=$(mktemp -d)
+  local cmember; cmember=$(bsdtar -tf "$REAL_DEB" | grep '^control\.tar' | head -1)
+  bsdtar -xOf "$REAL_DEB" "$cmember" | bsdtar -xO -f - '*control' \
+    | sed "s/^Version: .*/Version: $ver/" > "$w/control"
+  if [[ -n $extradep ]]; then
+    sed -i "s/^Depends: /Depends: $extradep, /" "$w/control"
+  fi
+  ( cd "$w" && bsdtar -cJf control.tar.xz control )
+  mkdir -p "$w/data/usr/lib/claude-desktop/resources/linux-mime" \
+           "$w/data/usr/share/icons/hicolor/512x512/apps" \
+           "$w/data/$(dirname "$desktop")"
+  touch "$w/data/usr/lib/claude-desktop/chrome-sandbox" \
+        "$w/data/usr/lib/claude-desktop/LICENSES.chromium.html" \
+        "$w/data/usr/lib/claude-desktop/resources/linux-mime/com.anthropic.Claude.xml" \
+        "$w/data/usr/share/icons/hicolor/512x512/apps/claude.png" \
+        "$w/data/$desktop"
+  case $datamember in
+    data.tar.xz)  ( cd "$w/data" && bsdtar -cJf "../$datamember" usr ) ;;
+    data.tar.zst) ( cd "$w/data" && bsdtar -c --zstd -f "../$datamember" usr ) ;;
+  esac
+  printf '2.0\n' > "$w/debian-binary"
+  rm -f "$out"
+  ( cd "$w" && ar qc "$out" debian-binary control.tar.xz "$datamember" )
+  rm -rf "$w"
+}
+
+t_deb_tokens_splits_alternation() {
+  fresh_tmp
+  printf 'Depends: a | b, c (>= 1)\n' > "$TMP/control"
+  local got
+  got=$(deb_tokens "$TMP/control" Depends | tr '\n' ' ')
+  expect_eq "$got" "a b c "
+}
+
+t_drift_same_deb_passes() {
+  fresh_tmp
+  local rc=0
+  drift_check "$REAL_DEB" "$REAL_DEB" > "$TMP/report" 2>&1 || rc=$?
+  expect_exit 0 "$rc" || { cat "$TMP/report" >&2; return 1; }
+}
+
+t_drift_new_dep_stops() {
+  fresh_tmp
+  make_synthetic_deb "$TMP/next.deb" 9.0.0.1 libfoo1
+  local out rc=0
+  out=$(drift_check "$REAL_DEB" "$TMP/next.deb" 2>&1) || rc=$?
+  expect_exit 1 "$rc" || return 1
+  expect_contains "$out" "libfoo1"
+}
+
+t_drift_moved_desktop_file_stops() {
+  fresh_tmp
+  make_synthetic_deb "$TMP/next.deb" 9.0.0.1 "" data.tar.xz usr/share/applications/claude-moved.desktop
+  local out rc=0
+  out=$(drift_check "$REAL_DEB" "$TMP/next.deb" 2>&1) || rc=$?
+  expect_exit 1 "$rc" || return 1
+  expect_contains "$out" "com.anthropic.Claude.desktop"
+}
+
+t_drift_zst_data_stops() {
+  fresh_tmp
+  make_synthetic_deb "$TMP/next.deb" 9.0.0.1 "" data.tar.zst
+  local out rc=0
+  out=$(drift_check "$REAL_DEB" "$TMP/next.deb" 2>&1) || rc=$?
+  expect_exit 1 "$rc" || return 1
+  expect_contains "$out" "prepare()"
+}
+
+t_fetch_deb_unfetchable_message() {
+  fresh_tmp
+  mkdir -p "$TMP/emptypool"
+  local out rc=0
+  out=$(UPDATER_POOL_URL_BASE="file://$TMP/emptypool" UPDATER_STATE_DIR="$TMP/state" \
+        fetch_deb "$FIX/newer/binary-amd64/Packages" 9.0.0.1 "$TMP/dest" 2>&1) || rc=$?
+  [[ $rc -ne 0 ]] || _t_fail "expected nonzero exit" || return 1
+  expect_contains "$out" "not yet fetchable"
+}
+
 # --- runner ------------------------------------------------------------------
 all_tests=$(declare -F | awk '$3 ~ /^t_/ {print $3}')
 tests=${*:-$all_tests}
