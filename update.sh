@@ -523,7 +523,12 @@ cmd_publish() {
   echo "== publish: GitHub ($rd) =="
   run git -C "$rd" add PKGBUILD .SRCINFO claude-desktop.sh || die "git add failed"
   run git -C "$rd" commit -m "Update to $ver-$rel" || die "git commit failed in $rd"
-  run git -C "$rd" -c "credential.helper=!f(){ echo username=AegixLinux; echo password=\$(gh auth token -u AegixLinux); }; f" push origin HEAD:main \
+  # The empty credential.helper RESETS the global helper list; without it the
+  # global gh helper answers first as the active account (timbeach) and the
+  # push gets a 403.
+  run git -C "$rd" -c credential.helper= \
+    -c "credential.helper=!f(){ echo username=AegixLinux; echo password=\$(gh auth token -u AegixLinux); }; f" \
+    push origin HEAD:main \
     || die "GitHub push failed"
 
   echo "== publish: AUR ($aur) =="
