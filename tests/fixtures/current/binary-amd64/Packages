@@ -1,0 +1,29 @@
+Package: claude-desktop
+Version: 1.17282.0
+Architecture: amd64
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Filename: pool/main/c/claude-desktop/claude-desktop_1.17282.0_amd64.deb
+Size: 144238024
+SHA256: 1c2bab32bac58dd7994e39190f370131790342409f201cf7c7133120a5b5c8df
+Description: Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 4.23118.1
+Architecture: amd64
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Filename: pool/main/c/claude-desktop/claude-desktop_4.23118.1_amd64.deb
+Size: 150000000
+SHA256: b09ccdd72b38916c9637d48548db70e77c425eb2e09bb467465409d2ff9d287a
+Description: Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.17180.0
+Architecture: amd64
+Depends: libgtk-3-0, libnotify4, libnss3
+Recommends: ca-certificates
+Filename: pool/main/c/claude-desktop/claude-desktop_1.17180.0_amd64.deb
+Size: 143265500
+SHA256: 798e373af6fa46edc59b1cb3229a6104fc38ccf66cb9bfeeea698437fa03f5bd
+Description: Desktop application for Claude.ai
