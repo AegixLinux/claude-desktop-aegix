@@ -247,6 +247,53 @@ t_fetch_deb_unfetchable_message() {
   expect_contains "$out" "not yet fetchable"
 }
 
+# --- Task 4 tests ------------------------------------------------------------
+
+SHA_A=$(printf 'a%.0s' {1..64})
+SHA_B=$(printf 'b%.0s' {1..64})
+
+copy_pkgbuild() { fresh_tmp; cp "$REPO/PKGBUILD" "$TMP/PKGBUILD"; }
+
+t_rewrite_sets_all_four() {
+  copy_pkgbuild
+  rewrite_pkgbuild 9.0.0.1 "$SHA_A" "$SHA_B" "$TMP/PKGBUILD" || return 1
+  grep -q "^pkgver=9.0.0.1$" "$TMP/PKGBUILD" || _t_fail "pkgver not set" || return 1
+  grep -q "^pkgrel=1$" "$TMP/PKGBUILD" || _t_fail "pkgrel not reset" || return 1
+  grep -q "^sha256sums_x86_64=('$SHA_A')$" "$TMP/PKGBUILD" || _t_fail "amd64 sum not set" || return 1
+  grep -q "^sha256sums_aarch64=('$SHA_B')$" "$TMP/PKGBUILD" || _t_fail "arm64 sum not set"
+}
+
+t_rewrite_resets_pkgrel() {
+  copy_pkgbuild
+  sed -i 's/^pkgrel=.*/pkgrel=3/' "$TMP/PKGBUILD"
+  rewrite_pkgbuild 9.0.0.1 "$SHA_A" "$SHA_B" "$TMP/PKGBUILD" || return 1
+  expect_eq "$(sed -n 's/^pkgrel=//p' "$TMP/PKGBUILD")" "1"
+}
+
+t_rewrite_anchor_missing_dies() {
+  copy_pkgbuild
+  sed -i '/^sha256sums_aarch64=/d' "$TMP/PKGBUILD"
+  local out rc=0
+  out=$(rewrite_pkgbuild 9.0.0.1 "$SHA_A" "$SHA_B" "$TMP/PKGBUILD" 2>&1) || rc=$?
+  [[ $rc -ne 0 ]] || _t_fail "expected die on missing anchor" || return 1
+  expect_contains "$out" "sha256sums_aarch64"
+}
+
+t_bump_pkgrel() {
+  copy_pkgbuild
+  bump_pkgrel "$TMP/PKGBUILD" || return 1
+  expect_eq "$(sed -n 's/^pkgrel=//p' "$TMP/PKGBUILD")" "2" || return 1
+  expect_eq "$(sed -n 's/^pkgver=//p' "$TMP/PKGBUILD")" "4.23118.1"
+}
+
+t_srcinfo_matches() {
+  copy_pkgbuild
+  cp "$REPO/claude-desktop.sh" "$TMP/"
+  rewrite_pkgbuild 9.0.0.1 "$SHA_A" "$SHA_B" "$TMP/PKGBUILD" || return 1
+  regen_srcinfo "$TMP" || return 1
+  grep -q "pkgver = 9.0.0.1" "$TMP/.SRCINFO" || _t_fail ".SRCINFO lacks the new pkgver"
+}
+
 # --- runner ------------------------------------------------------------------
 all_tests=$(declare -F | awk '$3 ~ /^t_/ {print $3}')
 tests=${*:-$all_tests}

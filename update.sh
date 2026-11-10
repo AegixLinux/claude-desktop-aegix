@@ -186,6 +186,38 @@ fetch_deb() {
   printf '%s\n' "$out"
 }
 
+# rewrite_pkgbuild <pkgver> <sha_amd64> <sha_arm64> [pkgbuild]: set pkgver,
+# reset pkgrel=1, write both sums, then re-read and die unless every value
+# reads back exactly (a sed anchor that matched nothing must not ship).
+rewrite_pkgbuild() {
+  local ver=$1 sha64=$2 shaarm=$3 pb=${4:-${UPDATER_REPO_DIR:-$REPO_DIR}/PKGBUILD}
+  sed -i \
+    -e "s/^pkgver=.*/pkgver=$ver/" \
+    -e "s/^pkgrel=.*/pkgrel=1/" \
+    -e "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('$sha64')/" \
+    -e "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('$shaarm')/" \
+    "$pb"
+  grep -qx "pkgver=$ver" "$pb" || die "rewrite verification failed: pkgver anchor did not take in $pb"
+  grep -qx "pkgrel=1" "$pb" || die "rewrite verification failed: pkgrel anchor did not take in $pb"
+  grep -qx "sha256sums_x86_64=('$sha64')" "$pb" || die "rewrite verification failed: sha256sums_x86_64 anchor did not take in $pb"
+  grep -qx "sha256sums_aarch64=('$shaarm')" "$pb" || die "rewrite verification failed: sha256sums_aarch64 anchor did not take in $pb"
+}
+
+# bump_pkgrel [pkgbuild]: increment pkgrel only (packaging-only release).
+bump_pkgrel() {
+  local pb=${1:-${UPDATER_REPO_DIR:-$REPO_DIR}/PKGBUILD} rel
+  rel=$(sed -n 's/^pkgrel=//p' "$pb" | head -1)
+  [[ $rel =~ ^[0-9]+$ ]] || die "cannot read pkgrel from $pb"
+  sed -i "s/^pkgrel=.*/pkgrel=$((rel + 1))/" "$pb"
+  grep -qx "pkgrel=$((rel + 1))" "$pb" || die "pkgrel bump did not take in $pb"
+}
+
+# regen_srcinfo [dir]: regenerate .SRCINFO from the PKGBUILD there.
+regen_srcinfo() {
+  local dir=${1:-${UPDATER_REPO_DIR:-$REPO_DIR}}
+  ( cd "$dir" && makepkg --printsrcinfo > .SRCINFO ) || die ".SRCINFO regeneration failed in $dir"
+}
+
 # --- modes -------------------------------------------------------------------
 
 cmd_check() {
