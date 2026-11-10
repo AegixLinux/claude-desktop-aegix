@@ -285,12 +285,29 @@ namcap_gate() {
   return 0
 }
 
+# previous_pkg <builddir> <exclude-path>: newest package that is not the one
+# just installed. pacman -U does NOT populate /var/cache/pacman/pkg (learned
+# in the first dress rehearsal), so the build dir is the primary source and
+# the pacman cache only a fallback.
+previous_pkg() {
+  local exclude=$2 c
+  for c in $(ls -t "$1"/claude-desktop-aegix-bin-*.pkg.tar.zst \
+                   "${UPDATER_PKG_CACHE_DIR:-/var/cache/pacman/pkg}"/claude-desktop-aegix-bin-*.pkg.tar.zst 2> /dev/null); do
+    [[ $c == "$exclude" ]] && continue
+    printf '%s\n' "$c"
+    return 0
+  done
+  return 1
+}
+
 smoke_fail() {
   echo "SMOKE TEST FAILED: $*" >&2
   local prev
-  prev=$(ls -t /var/cache/pacman/pkg/claude-desktop-aegix-bin-*.pkg.tar.zst 2> /dev/null | sed -n 2p)
+  prev=$(previous_pkg "$(dirname "${SMOKE_PKG:-/nonexistent}")" "${SMOKE_PKG:-}")
   if [[ -n $prev ]] && confirm "Reinstall previous package $prev?"; then
     sudo pacman -U --noconfirm "$prev" || echo "rollback failed; fix by hand" >&2
+  else
+    [[ -n $prev ]] || echo "no previous package found to roll back to" >&2
   fi
   die "stopping before publish"
 }
@@ -298,6 +315,7 @@ smoke_fail() {
 # smoke_test <pkgfile>: install and prove the app works on this machine.
 smoke_test() {
   local pkg=$1 out rc start dur ver cur
+  SMOKE_PKG=$pkg
   sudo pacman -U --noconfirm "$pkg" || die "pacman -U failed"
 
   start=$(date +%s)

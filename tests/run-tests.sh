@@ -279,8 +279,24 @@ t_rewrite_anchor_missing_dies() {
   expect_contains "$out" "sha256sums_aarch64"
 }
 
+t_previous_pkg() {
+  fresh_tmp
+  mkdir -p "$TMP/rd" "$TMP/cache"
+  touch -d '2 hours ago' "$TMP/rd/claude-desktop-aegix-bin-4.0.0.1-1-x86_64.pkg.tar.zst"
+  touch -d '1 hour ago'  "$TMP/rd/claude-desktop-aegix-bin-4.0.0.2-1-x86_64.pkg.tar.zst"
+  local got
+  got=$(UPDATER_PKG_CACHE_DIR="$TMP/cache" previous_pkg "$TMP/rd" "$TMP/rd/claude-desktop-aegix-bin-4.0.0.2-1-x86_64.pkg.tar.zst") || return 1
+  expect_eq "$got" "$TMP/rd/claude-desktop-aegix-bin-4.0.0.1-1-x86_64.pkg.tar.zst" || return 1
+  # nothing but the just-installed package anywhere: no candidate, nonzero
+  rm -f "$TMP/rd/claude-desktop-aegix-bin-4.0.0.1-1-x86_64.pkg.tar.zst"
+  local rc=0
+  UPDATER_PKG_CACHE_DIR="$TMP/cache" previous_pkg "$TMP/rd" "$TMP/rd/claude-desktop-aegix-bin-4.0.0.2-1-x86_64.pkg.tar.zst" > /dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] || _t_fail "expected no candidate"
+}
+
 t_bump_pkgrel() {
   copy_pkgbuild
+  sed -i 's/^pkgrel=.*/pkgrel=1/' "$TMP/PKGBUILD"
   bump_pkgrel "$TMP/PKGBUILD" || return 1
   expect_eq "$(sed -n 's/^pkgrel=//p' "$TMP/PKGBUILD")" "2" || return 1
   expect_eq "$(sed -n 's/^pkgver=//p' "$TMP/PKGBUILD")" "4.23118.1"
