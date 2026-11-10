@@ -294,6 +294,47 @@ t_srcinfo_matches() {
   grep -q "pkgver = 9.0.0.1" "$TMP/.SRCINFO" || _t_fail ".SRCINFO lacks the new pkgver"
 }
 
+# --- Task 5 tests ------------------------------------------------------------
+
+run_full() { # run_full <fixture-base-url> [extra env assignments...]
+  local url=$1; shift
+  env UPDATER_STATE_DIR="$TMP/state" UPDATER_INDEX_URL_BASE="$url" \
+      UPDATER_ASSUME_NO=1 "$@" bash "$UPDATE" 2>&1
+}
+
+t_full_equal_versions_exits_zero() {
+  fresh_tmp
+  local out rc=0
+  out=$(run_full "file://$FIX/current") || rc=$?
+  expect_exit 0 "$rc" || return 1
+  expect_contains "$out" "up to date"
+}
+
+t_full_downgrade_dies() {
+  fresh_tmp
+  local out rc=0
+  out=$(run_full "file://$FIX/old") || rc=$?
+  [[ $rc -ne 0 ]] || _t_fail "expected nonzero exit" || return 1
+  expect_contains "$out" "never downgrades"
+}
+
+t_full_arch_skew_stops() {
+  fresh_tmp
+  local out rc=0
+  out=$(run_full "file://$FIX/newer") || rc=$?
+  [[ $rc -ne 0 ]] || _t_fail "expected nonzero exit" || return 1
+  expect_contains "$out" "arm64"
+}
+
+t_namcap_gate() {
+  local rc=0
+  ( namcap_gate <<< "PKGBUILD E: something-bad" ) > /dev/null 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] || _t_fail "E: line did not stop the gate" || return 1
+  rc=0
+  ( namcap_gate <<< "PKGBUILD W: only-a-warning" ) > /dev/null 2>&1 || rc=$?
+  expect_exit 0 "$rc"
+}
+
 # --- runner ------------------------------------------------------------------
 all_tests=$(declare -F | awk '$3 ~ /^t_/ {print $3}')
 tests=${*:-$all_tests}

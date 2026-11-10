@@ -274,7 +274,162 @@ cmd_cron() {
   printf '%s\n' "$ver" > "$sdir/last-notified"
   exit 0
 }
-cmd_full() { die "not implemented"; }
+# namcap_gate: pass namcap PKGBUILD output through; die on E: lines, W: flows.
+namcap_gate() {
+  local out
+  out=$(cat)
+  [[ -n $out ]] && printf '%s\n' "$out"
+  if printf '%s\n' "$out" | grep -q '^PKGBUILD E:'; then
+    die "namcap reported errors on the PKGBUILD; fix before building"
+  fi
+  return 0
+}
+
+smoke_fail() {
+  echo "SMOKE TEST FAILED: $*" >&2
+  local prev
+  prev=$(ls -t /var/cache/pacman/pkg/claude-desktop-aegix-bin-*.pkg.tar.zst 2> /dev/null | sed -n 2p)
+  if [[ -n $prev ]] && confirm "Reinstall previous package $prev?"; then
+    sudo pacman -U --noconfirm "$prev" || echo "rollback failed; fix by hand" >&2
+  fi
+  die "stopping before publish"
+}
+
+# smoke_test <pkgfile>: install and prove the app works on this machine.
+smoke_test() {
+  local pkg=$1 out rc start dur ver cur
+  sudo pacman -U --noconfirm "$pkg" || die "pacman -U failed"
+
+  start=$(date +%s)
+  out=$(timeout 12 claude-desktop 2>&1); rc=$?
+  dur=$(( $(date +%s) - start ))
+  if grep -qE 'Exiting GPU process|eglInitialize' <<< "$out"; then
+    smoke_fail "GPU process errors in launch output: $(grep -m2 -E 'Exiting GPU process|eglInitialize' <<< "$out")"
+  fi
+  if [[ $rc -ne 124 ]] && ! pgrep -f /usr/lib/claude-desktop > /dev/null; then
+    smoke_fail "app exited after ${dur}s with no surviving instance (exit $rc)"
+  fi
+  echo "launch: ok (${dur}s, exit $rc, instance running: $(pgrep -cf /usr/lib/claude-desktop))"
+
+  [[ $(stat -c '%a %U' /usr/lib/claude-desktop/chrome-sandbox) == "4755 root" ]] \
+    || smoke_fail "chrome-sandbox is not setuid root"
+  echo "chrome-sandbox: 4755 root"
+
+  [[ $(xdg-mime query default x-scheme-handler/claude) == "com.anthropic.Claude.desktop" ]] \
+    || smoke_fail "claude: URL scheme handler is not com.anthropic.Claude.desktop"
+  echo "scheme handler: ok"
+
+  local flags_x11 flags_way
+  flags_x11=$(sed 's/^exec /echo /' /usr/bin/claude-desktop | env -u WAYLAND_DISPLAY sh)
+  flags_way=$(sed 's/^exec /echo /' /usr/bin/claude-desktop | env WAYLAND_DISPLAY=wayland-0 sh)
+  if [[ -e /proc/driver/nvidia/version && ! -f $HOME/.config/claude-desktop-flags.conf ]]; then
+    grep -q -- '--ozone-platform=x11' <<< "$flags_x11" \
+      || smoke_fail "wrapper did not add the NVIDIA X11 flags: $flags_x11"
+  fi
+  echo "wrapper flags x11: $flags_x11"
+  echo "wrapper flags wayland: $flags_way"
+
+  cur=$(pkgbuild_get pkgver)
+  ver=$(head -c 300000 /usr/lib/claude-desktop/resources/app.asar 2> /dev/null \
+    | grep -oam1 '"version": *"[0-9][0-9.]*"' | grep -oam1 '[0-9][0-9.]*')
+  if [[ -n $ver ]]; then
+    [[ $ver == "$cur" ]] || smoke_fail "app.asar reports $ver, PKGBUILD says $cur"
+    echo "app version: $ver (matches pkgver)"
+  else
+    echo "app version: could not read from app.asar; pacman says $(pacman -Q claude-desktop-aegix-bin)"
+  fi
+  echo "smoke test: PASS"
+}
+
+# build_and_test <no_publish>: lint, build, pause 1 (install + smoke).
+build_and_test() {
+  local no_publish=$1 rd pkgfile
+  rd=${UPDATER_REPO_DIR:-$REPO_DIR}
+  ( cd "$rd" && namcap PKGBUILD 2>&1 ) | namcap_gate || exit 1
+  ( cd "$rd" && makepkg -f ) || die "makepkg failed"
+  pkgfile=$(ls -t "$rd"/claude-desktop-aegix-bin-*.pkg.tar.zst | head -1)
+  [[ -n $pkgfile ]] || die "no built package found"
+  echo "== namcap on the built package (informational; a repacked Electron blob always warns) =="
+  namcap "$pkgfile" 2>&1 || true
+  confirm "PAUSE 1: install $(basename "$pkgfile") and run the smoke test (needs sudo)?" \
+    || die "stopped before install"
+  smoke_test "$pkgfile"
+}
+
+# cmd_full <deb_path> <no_publish> <pkgrel_only>
+cmd_full() {
+  local deb_path=$1 no_publish=$2 pkgrel_only=$3
+  local sdir idxa idxr ver cur sha64 shaarm newdeb olddeb report
+  sdir=$(state_dir); mkdir -p "$sdir/debs"
+
+  if [[ $pkgrel_only == 1 ]]; then
+    echo "packaging-only release: bumping pkgrel"
+    bump_pkgrel
+    regen_srcinfo
+    build_and_test "$no_publish"
+    cmd_publish "$(pkgbuild_get pkgver)" "$no_publish"
+    return
+  fi
+
+  idxa=$(mktemp) || die "mktemp failed"
+  fetch_index amd64 > "$idxa" || die "cannot fetch the amd64 Packages index"
+  ver=$(latest_version "$idxa") || die "no versions in the index"
+  cur=$(pkgbuild_get pkgver)
+  if [[ $ver == "$cur" ]]; then
+    echo "up to date: upstream $ver == PKGBUILD $cur"
+    rm -f "$idxa"; exit 0
+  fi
+  if [[ $(vercmp "$ver" "$cur") -lt 0 ]]; then
+    rm -f "$idxa"
+    die "upstream newest is $ver, below packaged $cur: upstream pulled a release. The updater never downgrades; handle this by hand if it must happen."
+  fi
+  echo "update: $cur -> $ver"
+
+  idxr=$(mktemp) || die "mktemp failed"
+  fetch_index arm64 > "$idxr" || die "cannot fetch the arm64 Packages index"
+  shaarm=$(stanza_field "$idxr" "$ver" SHA256)
+  if [[ -z $shaarm ]]; then
+    echo "the arm64 index does not have $ver yet (amd64 does): the arches are skewed."
+    echo "Recommended: wait a day and rerun. Proceeding publishes a PKGBUILD whose"
+    echo "aarch64 source entry is broken until upstream catches up."
+    confirm "Proceed anyway?" || die "stopping on arch skew; rerun when arm64 catches up"
+    shaarm=$(sed -n "s/^sha256sums_aarch64=('\(.*\)')$/\1/p" "${UPDATER_REPO_DIR:-$REPO_DIR}/PKGBUILD")
+  fi
+
+  if pgrep -f /usr/lib/claude-desktop > /dev/null; then
+    echo "claude-desktop is RUNNING: replacing /usr/lib/claude-desktop under it breaks new windows until restart."
+    confirm "Proceed with it running?" || die "stopped; quit the app and rerun"
+  fi
+
+  if [[ -n $deb_path ]]; then
+    newdeb=$deb_path
+  else
+    newdeb=$(fetch_deb "$idxa" "$ver" "$sdir/debs") || exit 1
+  fi
+  olddeb=""
+  for olddeb in "$sdir/debs/claude-desktop_${cur}_amd64.deb" \
+                "${UPDATER_REPO_DIR:-$REPO_DIR}/claude-desktop_${cur}_amd64.deb" \
+                "$HOME/Applications/claude-desktop/claude-desktop_amd64.deb"; do
+    [[ -f $olddeb ]] && break
+  done
+  [[ -f $olddeb ]] || die "no previous .deb found for the drift diff"
+  echo "== drift check: $(basename "$olddeb") vs $(basename "$newdeb") =="
+  drift_check "$olddeb" "$newdeb" || die "drift check stopped the run; resolve the STOP lines (deps.map, PKGBUILD) and rerun"
+
+  sha64=$(stanza_field "$idxa" "$ver" SHA256)
+  rm -f "$idxa" "$idxr"
+  rewrite_pkgbuild "$ver" "$sha64" "$shaarm"
+  regen_srcinfo
+  build_and_test "$no_publish"
+  cmd_publish "$ver" "$no_publish"
+
+  cp -f "$newdeb" "$sdir/debs/" 2> /dev/null || true
+  echo "== report =="
+  echo "updated: $cur -> $ver (pkgrel 1); aarch64 published UNVERIFIED (not buildable here)"
+  echo "drift, smoke checks, and publish output are above"
+}
+
+cmd_publish() { die "publish not implemented"; }
 
 # --- dispatch ----------------------------------------------------------------
 

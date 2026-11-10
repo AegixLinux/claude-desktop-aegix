@@ -1,0 +1,10 @@
+Package: claude-desktop
+Version: 4.23118.1
+Architecture: arm64
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Filename: pool/main/c/claude-desktop/claude-desktop_4.23118.1_arm64.deb
+Size: 150000000
+SHA256: c31ccfad22540f613681a3b7f0b5e6b9a0f1ec489229a1de6e9eaf5b705bd767
+Description: Desktop application for Claude.ai
+
