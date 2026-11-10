@@ -42,10 +42,25 @@ To opt out, create the conf file (even an empty one).
 
 ## Updating to a new upstream version
 
+`update.sh` does the whole thing: detects the new version from Anthropic's
+apt index, diffs the new .deb against the old for packaging drift (deps
+against `deps.map`, maintainer scripts, file layout), rewrites the PKGBUILD,
+regenerates `.SRCINFO`, builds, and pauses exactly twice, once before
+`sudo pacman -U` plus a smoke test, once before publishing to GitHub and
+the AUR.
+
 ```sh
-curl -sL https://downloads.claude.ai/claude-desktop/apt/stable/dists/stable/main/binary-amd64/Packages \
-  | grep -E '^(Version|SHA256):' | tail -2
+./update.sh              # full run, two pauses
+./update.sh --check      # report only; exit 1 if an update exists
+./update.sh --no-publish # everything but the publish; prints those commands
+./update.sh --deb PATH   # use a local .deb (hash-verified against the index)
+./update.sh --pkgrel     # packaging-only release: bump pkgrel, build, publish
 ```
 
-Bump `pkgver`, set the new hashes (amd64 + arm64), reset `pkgrel=1`, then
-`makepkg --printsrcinfo > .SRCINFO`.
+The watch half runs from user anacron (`~/.config/anacrontab`, job
+`claude-desktop-check`, daily): `update.sh --cron` checks the index silently
+and, on a new version, seals a futureme message, so the envelope shows up in
+dwmblocks and the message says what to run. One message per version; state
+lives in `~/.local/state/claude-desktop-updater/`.
+
+Tests: `bash tests/run-tests.sh` (no network, no sudo, isolated futureme).
