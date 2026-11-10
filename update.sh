@@ -330,13 +330,10 @@ smoke_test() {
   echo "wrapper flags wayland: $flags_way"
 
   cur=$(pkgbuild_get pkgver)
-  ver=$(head -c 300000 /usr/lib/claude-desktop/resources/app.asar 2> /dev/null \
-    | grep -oam1 '"version": *"[0-9][0-9.]*"' | grep -oam1 '[0-9][0-9.]*')
-  if [[ -n $ver ]]; then
-    [[ $ver == "$cur" ]] || smoke_fail "app.asar reports $ver, PKGBUILD says $cur"
-    echo "app version: $ver (matches pkgver)"
+  if grep -qa "\"version\": \"$cur\"" /usr/lib/claude-desktop/resources/app.asar 2> /dev/null; then
+    echo "app version: app.asar contains \"version\": \"$cur\" (matches pkgver)"
   else
-    echo "app version: could not read from app.asar; pacman says $(pacman -Q claude-desktop-aegix-bin)"
+    smoke_fail "app.asar does not contain \"version\": \"$cur\"; the installed app is not the version the PKGBUILD claims"
   fi
   echo "smoke test: PASS"
 }
