@@ -40,6 +40,29 @@ That fixes `eglInitialize: Could not create a backing OpenGL context` /
 `Exiting GPU process due to errors during initialization`.
 To opt out, create the conf file (even an empty one).
 
+## Restarting the app
+
+Closing the window does not quit the app; it keeps running in the background.
+To restart it, force-quit:
+
+```
+pkill -9 -x claude-desktop
+```
+
+A plain `pkill` (SIGTERM) can leave it stuck shutting down, seen on 4.23118.1
+with NVIDIA on X11: the main process loops relaunching its GPU process and never
+exits, the window turns see-through, and every new launch hands off to the stuck
+instance and exits. `~/.config/Claude/logs/main.log` shows
+`GPU process gone (death 10000 while quitting)`. The updater's smoke test checks
+for this and reports it as a warning.
+
+File open dialogs need a working desktop portal (`xdg-desktop-portal` with a
+backend such as `xdg-desktop-portal-gtk`). On window managers without their own
+portal config, such as dwm, add `~/.config/xdg-desktop-portal/portals.conf`
+containing `[preferred]` and `default=gtk`, and make sure the session bus knows
+your display (`dbus-update-activation-environment DISPLAY XAUTHORITY` in
+xprofile). Aegix ships both.
+
 ## Updating to a new upstream version
 
 `update.sh` does the whole thing: detects the new version from Anthropic's

@@ -315,6 +315,22 @@ previous_pkg() {
   return 1
 }
 
+# launch_verdict <timeout exit> <instances before launch>: classify a smoke launch.
+#   handoff    the app was already running; the launch handed off and exited
+#   clean      ran the full 12 s, then quit on SIGTERM (timeout exit 124)
+#   quit-hang  ran, but ignored SIGTERM and needed SIGKILL (timeout -k exit 137)
+#   fail       exited on its own before the 12 s were up
+launch_verdict() {
+  local rc=$1 pre=$2
+  if [[ $pre -gt 0 && $rc -eq 0 ]]; then echo handoff
+  elif [[ $rc -eq 124 ]]; then echo clean
+  elif [[ $rc -eq 137 ]]; then echo quit-hang
+  else echo fail
+  fi
+}
+
+SMOKE_WARNINGS=()
+
 smoke_fail() {
   echo "SMOKE TEST FAILED: $*" >&2
   local prev
@@ -333,18 +349,32 @@ smoke_test() {
   SMOKE_PKG=$pkg
   sudo pacman -U --noconfirm "$pkg" || die "pacman -U failed"
 
-  local pre_running
+  local pre_running verdict
   pre_running=$(pgrep -cf /usr/lib/claude-desktop || true)
   start=$(date +%s)
-  out=$(timeout 12 claude-desktop 2>&1); rc=$?
+  # timeout quits the app with SIGTERM after 12 s. -k 10: if it is still alive
+  # 10 s later (the known quit hang), SIGKILL it, or this line waits forever.
+  out=$(timeout -k 10 12 claude-desktop 2>&1); rc=$?
   dur=$(( $(date +%s) - start ))
   if grep -qE 'Exiting GPU process|eglInitialize' <<< "$out"; then
     smoke_fail "GPU process errors in launch output: $(grep -m2 -E 'Exiting GPU process|eglInitialize' <<< "$out")"
   fi
-  if [[ $rc -ne 124 ]] && ! pgrep -f /usr/lib/claude-desktop > /dev/null; then
-    smoke_fail "app exited after ${dur}s with no surviving instance (exit $rc)"
-  fi
-  echo "launch: ok (${dur}s, exit $rc, instance running: $(pgrep -cf /usr/lib/claude-desktop))"
+  verdict=$(launch_verdict "$rc" "${pre_running:-0}")
+  case $verdict in
+    quit-hang)
+      # Ours to clean up: we started this instance. Leftover helpers would
+      # keep a half-dead app around that every later launch hands off to.
+      pkill -9 -f /usr/lib/claude-desktop 2> /dev/null || true
+      SMOKE_WARNINGS+=("quit hang: the app did not exit within 10 s of SIGTERM and was force-killed (known upstream bug, see README)")
+      echo "WARNING: ${SMOKE_WARNINGS[-1]}"
+      ;;
+    fail)
+      if ! pgrep -f /usr/lib/claude-desktop > /dev/null; then
+        smoke_fail "app exited after ${dur}s with no surviving instance (exit $rc)"
+      fi
+      ;;
+  esac
+  echo "launch: ok (${dur}s, exit $rc, $verdict)"
   if [[ ${pre_running:-0} -gt 0 ]]; then
     echo "NOTE: the app was already running, so this launch handed off to it;"
     echo "      the GPU/EGL startup path was NOT exercised. Quit the app and"
@@ -375,7 +405,12 @@ smoke_test() {
   else
     smoke_fail "app.asar does not contain \"version\": \"$cur\"; the installed app is not the version the PKGBUILD claims"
   fi
-  echo "smoke test: PASS"
+  if [[ ${#SMOKE_WARNINGS[@]} -gt 0 ]]; then
+    echo "smoke test: PASS with ${#SMOKE_WARNINGS[@]} warning(s):"
+    printf '  - %s\n' "${SMOKE_WARNINGS[@]}"
+  else
+    echo "smoke test: PASS"
+  fi
 }
 
 # build_and_test <no_publish>: lint, build, pause 1 (install + smoke).

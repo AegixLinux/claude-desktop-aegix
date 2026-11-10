@@ -484,6 +484,25 @@ t_drift_added_mapped_dep_stops() {
   expect_contains "$out" "bubblewrap"
 }
 
+t_launch_verdict() {
+  expect_eq "$(launch_verdict 0 3)" handoff || return 1
+  expect_eq "$(launch_verdict 124 0)" clean || return 1
+  expect_eq "$(launch_verdict 137 0)" quit-hang || return 1
+  expect_eq "$(launch_verdict 0 0)" fail || return 1
+  expect_eq "$(launch_verdict 1 0)" fail
+}
+
+# The exit codes launch_verdict relies on, from the real timeout(1): a process
+# that quits on SIGTERM gives 124, one that ignores it gives 137 after -k.
+t_timeout_exit_codes() {
+  local rc=0
+  timeout -k 1 1 sleep 5 || rc=$?
+  expect_exit 124 "$rc" || return 1
+  rc=0
+  { timeout -k 1 1 bash -c 'trap "" TERM; sleep 5'; } 2> /dev/null || rc=$?
+  expect_exit 137 "$rc"
+}
+
 # --- runner ------------------------------------------------------------------
 all_tests=$(declare -F | awk '$3 ~ /^t_/ {print $3}')
 tests=${*:-$all_tests}
