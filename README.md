@@ -33,12 +33,33 @@ wrapper applies this automatically:
 
 ```
 --ozone-platform=x11
---use-angle=gl-egl
+--disable-gpu
 ```
 
-That fixes `eglInitialize: Could not create a backing OpenGL context` /
+That is software rendering. It costs some CPU (roughly 15 to 20% of one core with the
+window idle on a 2560x1440 monitor) and it is the only configuration that has stayed
+reliable on that driver. To opt out, create the conf file (even an empty one).
+
+### Why not the GPU on NVIDIA
+
+With no flags, the app's GPU process dies at startup with
+`eglInitialize: Could not create a backing OpenGL context` /
 `Exiting GPU process due to errors during initialization`.
-To opt out, create the conf file (even an empty one).
+
+With `--use-angle=gl-egl` (this package's default up to 6.28899.6-1) it starts, but
+within minutes to hours the window stops being updated. It either turns see-through
+or freezes on its last picture. The app itself keeps running and still receives
+clicks and keystrokes you cannot see land. Seen on 4.23118.1 through 5.11492.2 with
+NVIDIA 580 under X11 with a compositor. Software rendering ran for six days straight
+without it happening.
+
+If you run with GPU flags anyway and the window goes see-through or stops updating,
+restart only the GPU process. Chromium respawns it, the window repaints, and your
+sessions survive:
+
+```
+pkill -9 -f 'claude-desktop --type=gpu-process'
+```
 
 ## Restarting the app
 
@@ -55,6 +76,8 @@ exits, the window turns see-through, and every new launch hands off to the stuck
 instance and exits. `~/.config/Claude/logs/main.log` shows
 `GPU process gone (death 10000 while quitting)`. The updater's smoke test checks
 for this and reports it as a warning.
+It has not been seen with the software-rendering default: three quits on 5.x and
+6.x each finished within four seconds.
 
 File open dialogs need a working desktop portal (`xdg-desktop-portal` with a
 backend such as `xdg-desktop-portal-gtk`). On window managers without their own
